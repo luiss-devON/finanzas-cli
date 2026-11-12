@@ -18,7 +18,9 @@ Tus datos son tuyos: se guardan en un archivo SQLite local, sin cuentas ni nube.
 - **Tendencia** de los últimos N meses.
 - **CSV**: exporta para Excel/Google Sheets e importa extractos (acepta `,` o `;`, `12.50` o `12,50`).
 - **Dinero exacto**: montos guardados como enteros en centavos, nunca `float` (0.1 + 0.2 = 0.30 siempre).
-- **Sin dependencias**: solo la biblioteca estándar de Python.
+- **Sin dependencias**: solo la biblioteca estándar de Python. Funciona en Windows y Linux.
+
+> ⚠️ **macOS: no funciona por ahora.** Solo está probado y soportado en Windows y Linux.
 
 ## 📦 Instalación
 
