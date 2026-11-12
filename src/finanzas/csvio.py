@@ -26,6 +26,15 @@ def export_csv(store: Store, path: str | os.PathLike, month: str | None = None) 
     return len(movements)
 
 
+def _detect_delimiter(header: str) -> str:
+    """Elige ';' o ',' mirando solo la fila de encabezados.
+
+    No se usa csv.Sniffer porque su resultado varía entre versiones de Python y
+    se confunde con montos como '15,90' en archivos separados por ';'.
+    """
+    return ";" if header.count(";") > header.count(",") else ","
+
+
 def import_csv(store: Store, path: str | os.PathLike) -> tuple[int, list[str]]:
     """Importa un CSV con columnas fecha,tipo,monto,categoria[,descripcion].
 
@@ -34,13 +43,9 @@ def import_csv(store: Store, path: str | os.PathLike) -> tuple[int, list[str]]:
     Devuelve (filas_importadas, errores).
     """
     with open(path, newline="", encoding="utf-8-sig") as fh:
-        sample = fh.read(4096)
+        delimiter = _detect_delimiter(fh.readline())
         fh.seek(0)
-        try:
-            dialect = csv.Sniffer().sniff(sample, delimiters=",;")
-        except csv.Error:
-            dialect = csv.excel
-        reader = csv.DictReader(fh, dialect=dialect)
+        reader = csv.DictReader(fh, delimiter=delimiter)
         headers = {(h or "").strip().lower() for h in (reader.fieldnames or [])}
         missing = [f for f in FIELDS[:4] if f not in headers]
         if missing:
