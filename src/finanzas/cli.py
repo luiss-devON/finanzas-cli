@@ -49,6 +49,16 @@ def _positive(text: str) -> int:
     return value
 
 
+def _port(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if not 1 <= value <= 65535:
+        raise argparse.ArgumentTypeError("el puerto debe estar entre 1 y 65535")
+    return value
+
+
 def current_month() -> str:
     return date.today().strftime("%Y-%m")
 
@@ -102,6 +112,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("importar", help="carga movimientos desde un CSV")
     p.add_argument("archivo", type=Path)
+
+    p = sub.add_parser("web", help="abre el panel con gráficos en el navegador")
+    p.add_argument("--puerto", type=_port, default=8000, help="puerto local (por defecto: 8000)")
+    p.add_argument("--no-abrir", action="store_true", help="no abrir el navegador automáticamente")
     return parser
 
 
@@ -189,6 +203,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     db_path = args.db or Path(os.environ.get("FINANZAS_DB") or DEFAULT_DB)
     try:
+        if args.comando == "web":
+            from .web import serve
+            return serve(db_path, args.puerto, open_browser=not args.no_abrir)
         with Store(db_path) as store:
             return run(args, store)
     except (ValueError, OSError, sqlite3.Error) as exc:

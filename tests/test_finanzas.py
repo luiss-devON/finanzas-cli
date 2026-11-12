@@ -218,6 +218,8 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 2)
         code, _, err = self.run_cli("importar", "no-existe.csv")
         self.assertEqual(code, 1)
+        code, _, err = self.run_cli("web", "--puerto", "99999")
+        self.assertEqual(code, 2)
 
 
 if __name__ == "__main__":

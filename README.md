@@ -6,12 +6,13 @@
 ![SQLite](https://img.shields.io/badge/base%20de%20datos-SQLite-003B57)
 ![Licencia](https://img.shields.io/badge/licencia-MIT-green)
 
-Controla tus **gastos, ingresos y presupuestos** desde la terminal. Registra un gasto en 2 segundos, mira en qué se te va el dinero con gráficos de barras y recibe avisos cuando estás por pasarte de tu presupuesto.
+Controla tus **gastos, ingresos y presupuestos** desde la terminal o desde un **panel web con gráficos**. Registra un gasto en 2 segundos, mira en qué se te va el dinero con gráficos de barras y recibe avisos cuando estás por pasarte de tu presupuesto.
 
 Tus datos son tuyos: se guardan en un archivo SQLite local, sin cuentas ni nube.
 
 ## ✨ Características
 
+- **Panel web** (`finanzas web`): tarjetas de balance, gráfico de gastos por categoría, tendencia de 6 meses, presupuestos con barras de progreso, formularios y descarga CSV.
 - **Registro rápido**: `finanzas gasto 12.50 comida almuerzo`
 - **Resumen mensual**: ingresos, gastos, balance, % de ahorro y gráfico por categoría.
 - **Presupuestos** por categoría con avisos al 80 % y al excederlos.
@@ -48,6 +49,9 @@ finanzas tendencia --meses 6
 finanzas exportar respaldo.csv
 finanzas importar extracto_banco.csv
 finanzas borrar 7
+
+finanzas web                    # abre el panel en el navegador
+finanzas web --puerto 8080 --no-abrir
 ```
 
 Ejemplo de `finanzas resumen`:
@@ -70,6 +74,21 @@ Presupuestos de 2026-11
 ──────────────────────────────────────────────
   comida       ███████████████░░░░░░░░░ $182.10 / $300.00 (61%)
 ```
+
+### 🌐 Panel web
+
+`finanzas web` abre `http://127.0.0.1:8000` en tu navegador:
+
+![Panel web de finanzas-cli](docs/panel-web.png)
+
+
+- Ingresos, gastos, balance y % de ahorro del mes.
+- Gráfico de gastos por categoría y de ingresos vs. gastos de los últimos 6 meses (SVG, sin librerías externas).
+- Formulario para registrar movimientos y fijar presupuestos, con avisos al 80 % y al excederlos.
+- Tabla de movimientos con botón para borrar y navegación entre meses.
+- Descarga en CSV del mes o de todo.
+
+**Seguridad**: el servidor solo escucha en tu propio equipo (`127.0.0.1`), rechaza encabezados `Host` extraños (protección contra *DNS rebinding*), exige un token secreto en cada formulario (protección CSRF), escapa todo el texto (sin XSS) y envía una política `Content-Security-Policy` estricta.
 
 ### Formato CSV para importar
 
@@ -99,8 +118,9 @@ src/finanzas/
 ├── store.py    # capa de datos SQLite (consultas parametrizadas)
 ├── report.py   # resúmenes y gráficos de barras en texto
 ├── csvio.py    # importación/exportación CSV
+├── web.py      # panel web local (http.server + gráficos SVG)
 └── cli.py      # interfaz de línea de comandos (argparse)
-tests/          # 18 tests con unittest
+tests/          # 24 tests con unittest
 ```
 
 ## 📄 Licencia

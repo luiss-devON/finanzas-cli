@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import os
 from datetime import date
 from pathlib import Path
@@ -13,17 +14,25 @@ from .store import KINDS, Store
 FIELDS = ["fecha", "tipo", "monto", "categoria", "descripcion"]
 
 
+def csv_text(store: Store, month: str | None = None) -> tuple[str, int]:
+    """Devuelve (contenido CSV, cantidad de filas)."""
+    movements = store.movements(month=month)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(FIELDS)
+    for m in movements:
+        writer.writerow([m.date.isoformat(), m.kind, plain_amount(m.amount), m.category, m.description])
+    return buffer.getvalue(), len(movements)
+
+
 def export_csv(store: Store, path: str | os.PathLike, month: str | None = None) -> int:
     """Escribe los movimientos en un CSV. Devuelve cuántas filas se escribieron."""
-    movements = store.movements(month=month)
+    text, count = csv_text(store, month)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     # utf-8-sig: Excel reconoce las tildes correctamente
     with open(path, "w", newline="", encoding="utf-8-sig") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(FIELDS)
-        for m in movements:
-            writer.writerow([m.date.isoformat(), m.kind, plain_amount(m.amount), m.category, m.description])
-    return len(movements)
+        fh.write(text)
+    return count
 
 
 def _detect_delimiter(header: str) -> str:
