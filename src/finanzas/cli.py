@@ -59,6 +59,12 @@ def _port(text: str) -> int:
     return value
 
 
+def _pin(text: str) -> str:
+    if not (text.isascii() and text.isdigit() and 4 <= len(text) <= 12):
+        raise argparse.ArgumentTypeError("el PIN debe tener de 4 a 12 dígitos")
+    return text
+
+
 def current_month() -> str:
     return date.today().strftime("%Y-%m")
 
@@ -116,6 +122,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("web", help="abre el panel con gráficos en el navegador")
     p.add_argument("--puerto", type=_port, default=8000, help="puerto local (por defecto: 8000)")
     p.add_argument("--no-abrir", action="store_true", help="no abrir el navegador automáticamente")
+    p.add_argument("--red", action="store_true",
+                   help="permite abrirlo desde el celular en tu misma red WiFi (pide PIN)")
+    p.add_argument("--pin", type=_pin, help="PIN propio de 4 a 12 dígitos (por defecto se genera uno al azar)")
     return parser
 
 
@@ -204,8 +213,11 @@ def main(argv: list[str] | None = None) -> int:
     db_path = args.db or Path(os.environ.get("FINANZAS_DB") or DEFAULT_DB)
     try:
         if args.comando == "web":
+            if args.pin and not args.red:
+                print("Error: --pin solo se usa junto con --red", file=sys.stderr)
+                return 2
             from .web import serve
-            return serve(db_path, args.puerto, open_browser=not args.no_abrir)
+            return serve(db_path, args.puerto, open_browser=not args.no_abrir, red=args.red, pin=args.pin)
         with Store(db_path) as store:
             return run(args, store)
     except (ValueError, OSError, sqlite3.Error) as exc:

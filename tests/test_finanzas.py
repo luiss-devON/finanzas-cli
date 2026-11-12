@@ -220,6 +220,9 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 1)
         code, _, err = self.run_cli("web", "--puerto", "99999")
         self.assertEqual(code, 2)
+        for args in (["web", "--red", "--pin", "12"], ["web", "--red", "--pin", "12ab"], ["web", "--pin", "1234"]):
+            code, _, _ = self.run_cli(*args)
+            self.assertEqual(code, 2, args)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from finanzas import Store
-from finanzas.web import App, make_server, svg_categories, svg_trend
+from finanzas.web import App, make_server, new_pin, svg_categories, svg_trend
 
 HOST = "127.0.0.1:8000"
 
@@ -98,7 +98,102 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("ene 26", svg_trend([("2026-01", 100, 50), ("2026-02", 0, 0)]))
 
 
+class ModoRedTest(unittest.TestCase):
+    """Modo celular: acceso desde la red local con PIN."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.now = 1000.0
+        self.app = App(Path(self._tmp.name) / "red.db", port=8000, token="tok", pin="482913",
+                       clock=lambda: self.now)
+        self.lan = "192.168.1.50:8000"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def login(self, pin, client="192.168.1.20"):
+        return self.app.handle("POST", "/entrar", self.lan, urlencode({"pin": pin}).encode(), client=client)
+
+    def cookie_de(self, resp):
+        return dict(resp.headers)["Set-Cookie"].split(";")[0]
+
+    def test_pide_pin(self):
+        resp = self.app.handle("GET", "/", self.lan)
+        self.assertEqual((resp.status, dict(resp.headers)["Location"]), (303, "/entrar"))
+        self.assertEqual(self.app.handle("GET", "/exportar.csv", self.lan).status, 303)
+        self.assertEqual(self.app.handle("POST", "/movimiento", self.lan, b"token=tok").status, 303)
+        self.assertIn("PIN", self.app.handle("GET", "/entrar", self.lan).body.decode())
+
+    def test_login_y_sesion(self):
+        self.assertEqual(self.login("000000").status, 401)
+        resp = self.login("482913")
+        self.assertEqual(resp.status, 303)
+        cookie = self.cookie_de(resp)
+        self.assertIn("HttpOnly", dict(resp.headers)["Set-Cookie"])
+        self.assertIn("SameSite=Strict", dict(resp.headers)["Set-Cookie"])
+        ok = self.app.handle("GET", "/", self.lan, cookie=cookie)
+        self.assertEqual(ok.status, 200)
+        self.assertIn('href="/salir"', ok.body.decode())
+        self.assertEqual(self.app.handle("GET", "/", self.lan, cookie="finanzas_sesion=inventada").status, 303)
+        self.assertEqual(self.app.handle("GET", "/", self.lan, cookie="basura;;=;").status, 303)
+        # cerrar sesión
+        self.assertEqual(self.app.handle("GET", "/salir", self.lan, cookie=cookie).status, 303)
+        self.assertEqual(self.app.handle("GET", "/", self.lan, cookie=cookie).status, 303)
+
+    def test_sesion_caduca(self):
+        cookie = self.cookie_de(self.login("482913"))
+        self.now += 13 * 3600
+        self.assertEqual(self.app.handle("GET", "/", self.lan, cookie=cookie).status, 303)
+
+    def test_bloqueo_por_intentos(self):
+        for _ in range(4):
+            self.assertEqual(self.login("111111").status, 401)
+        self.assertEqual(self.login("111111").status, 429)
+        self.assertEqual(self.login("482913").status, 429)  # bloqueado aunque acierte
+        self.assertEqual(self.login("482913", client="192.168.1.21").status, 303)  # otro equipo no
+        self.now += 301
+        self.assertEqual(self.login("482913").status, 303)
+
+    def test_hosts(self):
+        for host, esperado in (("192.168.1.50:8000", 303), ("10.0.0.7:8000", 303), ("localhost:8000", 303),
+                               ("evil.com:8000", 403), ("192.168.1.50:9999", 403), ("192.168.1.50", 403),
+                               ("", 403)):
+            with self.subTest(host=host):
+                self.assertEqual(self.app.handle("GET", "/", host).status, esperado)
+        # sin PIN (modo local) la IP de la red se rechaza
+        local = App(Path(self._tmp.name) / "l.db", port=8000)
+        self.assertEqual(local.handle("GET", "/", "192.168.1.50:8000").status, 403)
+        self.assertEqual(local.handle("GET", "/entrar", "127.0.0.1:8000").status, 404)
+
+    def test_pin_aleatorio(self):
+        pins = {new_pin() for _ in range(50)}
+        self.assertTrue(all(len(p) == 6 and p.isdigit() for p in pins))
+        self.assertGreater(len(pins), 40)
+
+
 class WebServerTest(unittest.TestCase):
+    def test_servidor_en_red_con_pin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            httpd, app = make_server(Path(tmp) / "r.db", port=0, pin="1234")
+            self.assertEqual(httpd.server_address[0], "0.0.0.0")
+            hilo = threading.Thread(target=httpd.serve_forever, daemon=True)
+            hilo.start()
+            jar = urllib.request.HTTPCookieProcessor()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), jar)
+            try:
+                base = f"http://127.0.0.1:{app.port}"
+                with opener.open(base + "/") as r:  # redirige a /entrar
+                    self.assertTrue(r.url.endswith("/entrar"))
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    opener.open(base + "/entrar", data=b"pin=9999")
+                self.assertEqual(ctx.exception.code, 401)
+                with opener.open(base + "/entrar", data=b"pin=1234") as r:
+                    self.assertIn("Nuevo movimiento", r.read().decode())
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
+
     def test_servidor_real(self):
         with tempfile.TemporaryDirectory() as tmp:
             httpd, app = make_server(Path(tmp) / "s.db", port=0)

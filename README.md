@@ -13,6 +13,7 @@ Tus datos son tuyos: se guardan en un archivo SQLite local, sin cuentas ni nube.
 ## ✨ Características
 
 - **Panel web** (`finanzas web`): tarjetas de balance, gráfico de gastos por categoría, tendencia de 6 meses, presupuestos con barras de progreso, formularios y descarga CSV.
+- **Desde el celular** (`finanzas web --red`): ábrelo en el navegador del teléfono conectado a tu mismo WiFi, protegido con PIN.
 - **Registro rápido**: `finanzas gasto 12.50 comida almuerzo`
 - **Resumen mensual**: ingresos, gastos, balance, % de ahorro y gráfico por categoría.
 - **Presupuestos** por categoría con avisos al 80 % y al excederlos.
@@ -52,6 +53,7 @@ finanzas borrar 7
 
 finanzas web                    # abre el panel en el navegador
 finanzas web --puerto 8080 --no-abrir
+finanzas web --red              # también desde el celular (pide PIN)
 ```
 
 Ejemplo de `finanzas resumen`:
@@ -88,7 +90,29 @@ Presupuestos de 2026-11
 - Tabla de movimientos con botón para borrar y navegación entre meses.
 - Descarga en CSV del mes o de todo.
 
-**Seguridad**: el servidor solo escucha en tu propio equipo (`127.0.0.1`), rechaza encabezados `Host` extraños (protección contra *DNS rebinding*), exige un token secreto en cada formulario (protección CSRF), escapa todo el texto (sin XSS) y envía una política `Content-Security-Policy` estricta.
+**Seguridad**: por defecto el servidor solo escucha en tu propio equipo (`127.0.0.1`), rechaza encabezados `Host` extraños (protección contra *DNS rebinding*), exige un token secreto en cada formulario (protección CSRF), escapa todo el texto (sin XSS) y envía una política `Content-Security-Policy` estricta.
+
+### 📱 Desde el celular
+
+```bash
+finanzas web --red
+```
+
+```text
+Panel web en http://127.0.0.1:8000/  (Ctrl+C para detener)
+Desde el celular (mismo WiFi): http://192.168.1.10:8000/
+PIN: 482913
+```
+
+1. Conecta el celular al **mismo WiFi** que la PC.
+2. Abre en el navegador del celular la dirección que aparece en la PC.
+3. Escribe el PIN. Cada vez que inicias el panel se genera uno nuevo (o elige el tuyo con `--pin 2580`).
+
+La primera vez, Windows pregunta por el firewall: permite solo **Redes privadas**. La PC debe quedarse encendida con el comando abierto.
+
+<img src="docs/celular.png" alt="Panel en el celular" width="300">
+
+**Seguridad del modo red**: PIN obligatorio comparado en tiempo constante, bloqueo de 5 minutos tras 5 intentos fallidos, sesión en cookie `HttpOnly` y `SameSite=Strict` que caduca en 12 horas, botón para salir y solo se aceptan direcciones IP en el encabezado `Host`. Úsalo solo en redes de confianza (tu casa): la conexión es HTTP, sin cifrar.
 
 ### Formato CSV para importar
 
@@ -120,7 +144,7 @@ src/finanzas/
 ├── csvio.py    # importación/exportación CSV
 ├── web.py      # panel web local (http.server + gráficos SVG)
 └── cli.py      # interfaz de línea de comandos (argparse)
-tests/          # 24 tests con unittest
+tests/          # 31 tests con unittest
 ```
 
 ## 📄 Licencia

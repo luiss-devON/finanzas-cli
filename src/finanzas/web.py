@@ -1,18 +1,25 @@
 """Panel web local: gráficos, formularios y presupuestos en el navegador.
 
-Usa solo la biblioteca estándar. El servidor escucha únicamente en 127.0.0.1,
-valida el encabezado Host y exige un token en cada formulario (protección CSRF).
+Usa solo la biblioteca estándar. Por defecto el servidor escucha únicamente en
+127.0.0.1. Con red=True escucha en la red local (para abrirlo desde el celular)
+y exige un PIN, con bloqueo tras varios intentos fallidos. Siempre valida el
+encabezado Host y exige un token en cada formulario (protección CSRF).
 """
 
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import os
 import secrets
+import socket
+import threading
+import time
 import webbrowser
 from dataclasses import dataclass, field
 from datetime import date
 from html import escape as e
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
@@ -21,6 +28,10 @@ from .money import format_amount, parse_amount
 from .store import EXPENSE, INCOME, KINDS, Store, shift_month, validate_month
 
 MAX_BODY = 100_000
+COOKIE = "finanzas_sesion"
+SESSION_SECONDS = 12 * 3600
+MAX_FAILS = 5
+BLOCK_SECONDS = 300
 MESES = ("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic")
 PALETA = ("#6366f1", "#f59e0b", "#10b981", "#ef4444", "#06b6d4", "#a855f7", "#84cc16", "#ec4899")
 CSP = ("default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
@@ -96,7 +107,7 @@ STYLE = """
 *{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#f1f5f9;color:#0f172a}
 header{background:#0f172a;color:#fff;padding:1rem 1.5rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem}
 header h1{font-size:1.3rem;margin:0}.nav a{color:#fff;text-decoration:none;padding:.3rem .7rem;border-radius:8px;background:#1e293b;margin-left:.3rem}
-main{max-width:1100px;margin:auto;padding:1.5rem;display:grid;gap:1.2rem;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+main{max-width:1100px;margin:auto;padding:1.5rem;display:grid;gap:1.2rem;grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr))}
 .card{background:#fff;border-radius:14px;padding:1.2rem;box-shadow:0 1px 3px #0001}.wide{grid-column:1/-1}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem}
 .kpi{background:#fff;border-radius:14px;padding:1rem 1.2rem;box-shadow:0 1px 3px #0001}.kpi span{color:#64748b;font-size:.85rem}
@@ -111,7 +122,11 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}.del{background
 .budget{margin-bottom:.8rem}.budget .row{display:flex;justify-content:space-between;font-size:.9rem}
 .track{background:#e2e8f0;border-radius:99px;height:10px;margin-top:.3rem;overflow:hidden}.fill{height:100%;border-radius:99px}
 .msg{grid-column:1/-1;padding:.8rem 1rem;border-radius:10px}.ok{background:#dcfce7;color:#166534}.error{background:#fee2e2;color:#991b1b}
-.empty{color:#64748b}.actions{margin-top:.8rem;font-size:.9rem}
+.empty{color:#64748b}.actions{margin-top:.8rem;font-size:.9rem}.scroll{overflow-x:auto}
+header a.salir{background:#334155}.login{max-width:360px;margin:12vh auto;padding:0 1rem}.login form{display:grid;gap:.8rem}
+@media (max-width:600px){main{padding:.8rem;gap:.8rem}header{padding:.8rem}header h1{font-size:1.1rem}
+.nav a{margin:0 .3rem 0 0;font-size:.9rem}.kpis{grid-template-columns:1fr 1fr;gap:.6rem}.kpi b{font-size:1.25rem}
+td,th{padding:.45rem .3rem}.col-desc{display:none}}
 """
 
 
@@ -133,7 +148,8 @@ def _budgets_html(store: Store, month: str, token: str) -> str:
     return "".join(items) or '<p class="empty">No hay presupuestos. Crea uno abajo.</p>'
 
 
-def render_dashboard(store: Store, month: str, token: str, msg: str = "", ok: bool = True) -> str:
+def render_dashboard(store: Store, month: str, token: str, msg: str = "", ok: bool = True,
+                     logout: bool = False) -> str:
     totals = store.totals(month)
     income, expense = totals[INCOME], totals[EXPENSE]
     balance = income - expense
@@ -144,7 +160,7 @@ def render_dashboard(store: Store, month: str, token: str, msg: str = "", ok: bo
     hidden = f'<input type="hidden" name="token" value="{token}"><input type="hidden" name="mes" value="{month}">'
 
     rows = "".join(
-        f"<tr><td>{m.date.isoformat()}</td><td>{e(m.category)}</td><td>{e(m.description)}</td>"
+        f"<tr><td>{m.date.isoformat()}</td><td>{e(m.category)}</td><td class='col-desc'>{e(m.description)}</td>"
         f'<td class="num {"pos" if m.kind == INCOME else "neg"}">{e(format_amount(m.signed_amount))}</td>'
         f'<td><form method="post" action="/borrar" onsubmit="return confirm(\'¿Borrar este movimiento?\')">'
         f'{hidden}<input type="hidden" name="id" value="{m.id}"><button class="del" title="Borrar">✕</button></form></td></tr>'
@@ -155,12 +171,13 @@ def render_dashboard(store: Store, month: str, token: str, msg: str = "", ok: bo
     default_date = today.isoformat() if today.strftime("%Y-%m") == month else f"{month}-01"
     options = "".join(f'<option value="{e(c)}">' for c in categories)
     banner = f'<div class="msg {"ok" if ok else "error"}">{e(msg)}</div>' if msg else ""
+    salir = '<a class="salir" href="/salir">salir</a>' if logout else ""
 
     return f"""<!DOCTYPE html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Finanzas · {_month_label(month)}</title><style>{STYLE}</style></head><body>
 <header><h1>💰 Finanzas · {_month_label(month)}</h1><nav class="nav">
-<a href="/?mes={shift_month(month, -1)}">◀ anterior</a><a href="/">hoy</a><a href="/?mes={shift_month(month, 1)}">siguiente ▶</a></nav></header>
+<a href="/?mes={shift_month(month, -1)}">◀ anterior</a><a href="/">hoy</a><a href="/?mes={shift_month(month, 1)}">siguiente ▶</a>{salir}</nav></header>
 <main>{banner}
 <section class="kpis wide">
 <div class="kpi"><span>Ingresos</span><b class="pos">{e(format_amount(income))}</b></div>
@@ -184,27 +201,133 @@ def render_dashboard(store: Store, month: str, token: str, msg: str = "", ok: bo
 <input name="categoria" placeholder="Categoría" list="cats" required><input name="monto" placeholder="Límite mensual" inputmode="decimal" required>
 <button class="full">Fijar presupuesto</button></form></section>
 <section class="card wide"><h2>Movimientos de {_month_label(month)} ({len(movements)})</h2>
-<table><thead><tr><th>Fecha</th><th>Categoría</th><th>Descripción</th><th class="num">Monto</th><th></th></tr></thead>
-<tbody>{rows}</tbody></table>
+<div class="scroll"><table><thead><tr><th>Fecha</th><th>Categoría</th><th class="col-desc">Descripción</th><th class="num">Monto</th><th></th></tr></thead>
+<tbody>{rows}</tbody></table></div>
 <p class="actions"><a href="/exportar.csv?mes={month}">⬇ Descargar CSV de este mes</a> · <a href="/exportar.csv">⬇ Todo</a></p></section>
 </main></body></html>"""
+
+
+def render_login(error: str = "") -> str:
+    aviso = f'<div class="msg error">{e(error)}</div>' if error else ""
+    return f"""<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Finanzas · Entrar</title><style>{STYLE}</style></head><body>
+<div class="login"><div class="card"><h2>💰 Finanzas</h2><p class="empty">Escribe el PIN que aparece en la ventana de tu PC.</p>{aviso}
+<form method="post" action="/entrar"><input type="password" name="pin" inputmode="numeric" autocomplete="off"
+placeholder="PIN" required autofocus><button>Entrar</button></form></div></div></body></html>"""
+
+
+def new_pin() -> str:
+    return f"{secrets.randbelow(10**6):06d}"
+
+
+def local_ip() -> str:
+    """IP de esta PC en la red local (no envía ningún paquete)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
 
 
 # ---------- aplicación ----------
 
 class App:
-    def __init__(self, db_path: str | os.PathLike, port: int = 8000, token: str | None = None):
+    def __init__(self, db_path: str | os.PathLike, port: int = 8000, token: str | None = None,
+                 pin: str | None = None, clock=time.monotonic):
+        """Si se da `pin`, el panel es accesible desde la red local y exige ese PIN."""
         self.db_path = db_path
         self.port = port
         self.token = token or secrets.token_urlsafe(24)
+        self.pin = pin
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._sessions: dict[str, float] = {}
+        self._fails: dict[str, tuple[int, float]] = {}
 
     def _host_ok(self, host: str) -> bool:
-        return host in (f"127.0.0.1:{self.port}", f"localhost:{self.port}")
+        if host in (f"127.0.0.1:{self.port}", f"localhost:{self.port}"):
+            return True
+        if not self.pin:
+            return False
+        # En modo red solo se aceptan IP literales: así no hay DNS rebinding.
+        name, _, port = host.rpartition(":")
+        try:
+            ipaddress.IPv4Address(name)
+        except ValueError:
+            return False
+        return port == str(self.port)
 
-    def handle(self, method: str, target: str, host: str, body: bytes = b"") -> Response:
+    # ---------- sesiones y PIN ----------
+    def _session_ok(self, cookie_header: str) -> bool:
+        try:
+            cookie = SimpleCookie(cookie_header)
+        except CookieError:
+            return False
+        morsel = cookie.get(COOKIE)
+        if morsel is None:
+            return False
+        with self._lock:
+            expires = self._sessions.get(morsel.value)
+            if expires is None:
+                return False
+            if expires < self.clock():
+                del self._sessions[morsel.value]
+                return False
+            return True
+
+    def _login(self, client: str, body: bytes) -> Response:
+        now = self.clock()
+        with self._lock:
+            fails, until = self._fails.get(client, (0, 0.0))
+            if until > now:
+                minutes = max(1, round((until - now) / 60))
+                return _html(429, render_login(f"Demasiados intentos. Espera {minutes} min."))
+            pin = _first(parse_qs(body.decode("utf-8", "replace")), "pin")
+            if hmac.compare_digest(pin.encode(), self.pin.encode()):
+                self._fails.pop(client, None)
+                session = secrets.token_urlsafe(32)
+                self._sessions = {k: v for k, v in self._sessions.items() if v > now}
+                self._sessions[session] = now + SESSION_SECONDS
+                cookie = f"{COOKIE}={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_SECONDS}"
+                return Response(303, b"", [("Location", "/"), ("Set-Cookie", cookie)])
+            fails += 1
+            if fails >= MAX_FAILS:
+                self._fails[client] = (0, now + BLOCK_SECONDS)
+                return _html(429, render_login(f"PIN incorrecto. Bloqueado {BLOCK_SECONDS // 60} min."))
+            self._fails[client] = (fails, 0.0)
+        return _html(401, render_login(f"PIN incorrecto. Te quedan {MAX_FAILS - fails} intentos."))
+
+    def _logout(self, cookie_header: str) -> Response:
+        try:
+            morsel = SimpleCookie(cookie_header).get(COOKIE)
+        except CookieError:
+            morsel = None
+        if morsel is not None:
+            with self._lock:
+                self._sessions.pop(morsel.value, None)
+        return Response(303, b"", [("Location", "/entrar"),
+                                   ("Set-Cookie", f"{COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")])
+
+    def handle(self, method: str, target: str, host: str, body: bytes = b"",
+               client: str = "127.0.0.1", cookie: str = "") -> Response:
         if not self._host_ok(host):
             return _html(403, "Host no permitido.")
         url = urlsplit(target)
+        if self.pin:
+            if url.path == "/entrar":
+                if method == "POST":
+                    return self._login(client, body)
+                if method == "GET":
+                    return _html(200, render_login())
+                return _html(405, "Método no permitido.")
+            if url.path == "/salir":
+                return self._logout(cookie)
+            if not self._session_ok(cookie):
+                return Response(303, b"", [("Location", "/entrar")])
         query = parse_qs(url.query)
         try:
             with Store(self.db_path) as store:
@@ -214,7 +337,8 @@ class App:
                         validate_month(month)
                     except ValueError:
                         month = date.today().strftime("%Y-%m")
-                    page = render_dashboard(store, month, self.token, _first(query, "msg"), _first(query, "ok") != "0")
+                    page = render_dashboard(store, month, self.token, _first(query, "msg"), _first(query, "ok") != "0",
+                                            logout=bool(self.pin))
                     return _html(200, page)
                 if method == "GET" and url.path == "/exportar.csv":
                     month = _first(query, "mes") or None
@@ -291,8 +415,9 @@ def _budget_warning(store: Store, category: str, month: str) -> str:
 
 # ---------- servidor ----------
 
-def make_server(db_path: str | os.PathLike, port: int = 8000) -> tuple[ThreadingHTTPServer, App]:
-    app = App(db_path, port)
+def make_server(db_path: str | os.PathLike, port: int = 8000,
+                pin: str | None = None) -> tuple[ThreadingHTTPServer, App]:
+    app = App(db_path, port, pin=pin)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -310,7 +435,8 @@ def make_server(db_path: str | os.PathLike, port: int = 8000) -> tuple[Threading
                 resp = _html(413, "Solicitud demasiado grande.")
             else:
                 body = self.rfile.read(length) if length else b""
-                resp = app.handle(method, self.path, self.headers.get("Host", ""), body)
+                resp = app.handle(method, self.path, self.headers.get("Host", ""), body,
+                                  client=self.client_address[0], cookie=self.headers.get("Cookie", ""))
             self.send_response(resp.status)
             for name, value in resp.headers + [("Content-Security-Policy", CSP), ("X-Content-Type-Options", "nosniff"),
                                                ("Referrer-Policy", "no-referrer"), ("Cache-Control", "no-store")]:
@@ -323,17 +449,28 @@ def make_server(db_path: str | os.PathLike, port: int = 8000) -> tuple[Threading
             pass
 
     try:
-        httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        httpd = ThreadingHTTPServer(("0.0.0.0" if pin else "127.0.0.1", port), Handler)
     except OSError:
         raise OSError(f"el puerto {port} está ocupado; prueba con --puerto {port + 1}") from None
     app.port = httpd.server_address[1]
     return httpd, app
 
 
-def serve(db_path: str | os.PathLike, port: int = 8000, open_browser: bool = True) -> int:
-    httpd, app = make_server(db_path, port)
+def serve(db_path: str | os.PathLike, port: int = 8000, open_browser: bool = True,
+          red: bool = False, pin: str | None = None) -> int:
+    if red:
+        pin = pin or new_pin()
+    httpd, app = make_server(db_path, port, pin if red else None)
     url = f"http://127.0.0.1:{app.port}/"
     print(f"Panel web en {url}  (Ctrl+C para detener)")
+    if red:
+        ip = local_ip()
+        if ip.startswith("127."):
+            print("⚠ No se detectó una red local: conecta la PC al WiFi.")
+        else:
+            print(f"Desde el celular (mismo WiFi): http://{ip}:{app.port}/")
+        print(f"PIN: {pin}")
+        print("Si Windows pregunta por el firewall, permite solo 'Redes privadas'.")
     if open_browser:
         webbrowser.open(url)
     try:

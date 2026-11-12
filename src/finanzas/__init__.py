@@ -4,4 +4,4 @@ from .money import format_amount, parse_amount
 from .store import Movement, Store
 
 __all__ = ["Movement", "Store", "format_amount", "parse_amount"]
-__version__ = "1.1.0"
+__version__ = "1.2.0"
